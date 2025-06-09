@@ -6,7 +6,7 @@ from pyspark.ml.fpm import FPGrowth
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Konfigurasi koneksi database
+# Konfigurasi koneksi database a
 db_config = {
     "host": "localhost",
     "user": "root",
