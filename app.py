@@ -6,20 +6,20 @@ from pyspark.ml.fpm import FPGrowth
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Konfigurasi koneksi database a
+# Konfigurasi koneksi database
 db_config = {
     "host": "localhost",
     "user": "root",
     "password": "",
-    "database": "skripsi"
+    "database": "skripsi2"
 }
 
 # Fungsi koneksi database
 def connect_db():
     return mysql.connector.connect(**db_config)
 
-# Fungsi untuk menentukan nama tabel berdasarkan platform
-def get_table_name(base_table, platform=None):
+# Fungsi untuk menentukan nama tabel berdasarkan platform dan jenis tabel
+def get_table_name(base_table, platform=None, is_item_table=False):
     if platform is None:
         platform = st.session_state.get("bundling_type", "General").lower()
     else:
@@ -27,8 +27,42 @@ def get_table_name(base_table, platform=None):
     if base_table in ["deadstock", "category"]:
         return base_table
     else:
-        return f"{base_table}_{platform}" if platform != "general" else base_table
-    
+        table_name = f"{base_table}_{platform}" if platform != "general" else base_table
+        if is_item_table:
+            table_name += "_item"
+        return table_name
+
+# Fungsi untuk memastikan skema tabel item benar
+def ensure_correct_item_table_schema():
+    try:
+        conn = connect_db()
+        cursor = conn.cursor()
+        platforms = ["general", "shopee", "tokopedia", "lazada"]
+        for platform in platforms:
+            for base_table in ["bundling_all", "bundling_similarity", "bundling_ds"]:
+                table_name = get_table_name(base_table, platform, is_item_table=True)
+                # Cek skema tabel saat ini
+                cursor.execute(f"SHOW KEYS FROM {table_name} WHERE Key_name = 'PRIMARY'")
+                primary_keys = cursor.fetchall()
+                current_pk = [key[4] for key in primary_keys]  # Kolom ke-4 adalah nama kolom
+                expected_pk = ['id_bundling', 'id_barang', 'role']
+                
+                if sorted(current_pk) != sorted(expected_pk):
+                    # Drop primary key yang ada
+                    cursor.execute(f"ALTER TABLE {table_name} DROP PRIMARY KEY")
+                    # Tambahkan primary key baru
+                    cursor.execute(f"ALTER TABLE {table_name} ADD PRIMARY KEY (id_bundling, id_barang, role)")
+                    st.write(f"[DEBUG] Skema tabel {table_name} diperbarui dengan PRIMARY KEY (id_bundling, id_barang, role)")
+        conn.commit()
+        st.success("✅ Skema tabel item berhasil diperiksa dan diperbarui jika perlu.")
+    except mysql.connector.Error as e:
+        st.error(f"❌ Gagal memperbarui skema tabel item: {str(e)}")
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
+
 def check_platform_data(platform):
     try:
         conn = connect_db()
@@ -74,19 +108,19 @@ def check_tables_have_data():
 # Fungsi untuk mendapatkan parameter FP-Growth berdasarkan tipe bundling
 def get_fp_growth_params(bundling_type):
     params = {
-        "General": {"minSupport": 0.005, "minConfidence": 0.5},
-        "Shopee": {"minSupport": 0.003, "minConfidence": 0.6},
-        "Tokopedia": {"minSupport": 0.004, "minConfidence": 0.55},
-        "Lazada": {"minSupport": 0.006, "minConfidence": 0.45}
+        "General": {"minSupport": 0.001, "minConfidence": 0.3},
+        "Shopee": {"minSupport": 0.005, "minConfidence": 0.1},
+        "Tokopedia": {"minSupport": 0.003, "minConfidence": 0.4},
+        "Lazada": {"minSupport": 0.01, "minConfidence": 0.2}
     }
     return params.get(bundling_type, {"minSupport": 0.005, "minConfidence": 0.5})
 
 def get_fp_growth_ds_params(bundling_type):
     params = {
-        "General": {"minSupport": 0.005, "minConfidence": 0.5},
-        "Shopee": {"minSupport": 0.003, "minConfidence": 0.6},
-        "Tokopedia": {"minSupport": 0.004, "minConfidence": 0.55},
-        "Lazada": {"minSupport": 0.006, "minConfidence": 0.45}
+        "General": {"minSupport": 0.0005, "minConfidence": 0.5},
+        "Shopee": {"minSupport": 0.005, "minConfidence": 0.5},
+        "Tokopedia": {"minSupport": 0.005, "minConfidence": 0.5},
+        "Lazada": {"minSupport": 0.03, "minConfidence": 0.5}
     }
     return params.get(bundling_type, {"minSupport": 0.005, "minConfidence": 0.5})
 
@@ -174,9 +208,9 @@ def process_rfm_from_db(tahun_tren):
             Monetary=("jml", "sum")
         ).reset_index()
 
-        rfm["R_Score"] = rfm["Recency"].apply(score_recency, args=(tahun_tren,))
-        rfm["F_Score"] = rfm["Frequency"].apply(score_frequency, args=(tahun_tren,))
-        rfm["M_Score"] = rfm["Monetary"].apply(score_monetary, args=(tahun_tren,))
+        rfm["R_Score"] = rfm["Recency"].apply(score_recency, args=(1,))
+        rfm["F_Score"] = rfm["Frequency"].apply(score_frequency, args=(1,))
+        rfm["M_Score"] = rfm["Monetary"].apply(score_monetary, args=(1,))
         rfm["Category"] = rfm.apply(categorize_product, axis=1)
 
         for _, row in rfm.iterrows():
@@ -235,33 +269,45 @@ def run_fp_growth_and_store_to_db():
         model = fp_growth.fit(df_spark)
 
         rules_df = model.associationRules.toPandas()
-        rules_df = rules_df[rules_df["antecedent"].apply(lambda x: len(x) == 1) & rules_df["consequent"].apply(lambda x: len(x) == 1)]
 
         cursor.execute(f"DELETE FROM {get_table_name('bundling_all')}")
+        cursor.execute(f"DELETE FROM {get_table_name('bundling_all', is_item_table=True)}")
         cursor.execute(f"ALTER TABLE {get_table_name('bundling_all')} AUTO_INCREMENT = 1")
 
-        seen_pairs = set()
+        seen_rules = set()
         for _, row in rules_df.iterrows():
-            barang_1 = row["antecedent"][0]
-            barang_2 = row["consequent"][0]
-            pair = tuple(sorted([barang_1, barang_2]))
-            if pair not in seen_pairs:
-                cursor.execute(f"SELECT id_barang FROM {get_table_name('barang')} WHERE deskripsi_brg = %s", (barang_1,))
-                result1 = cursor.fetchone()
-                cursor.execute(f"SELECT id_barang FROM {get_table_name('barang')} WHERE deskripsi_brg = %s", (barang_2,))
-                result2 = cursor.fetchone()
+            antecedent = tuple(sorted(row["antecedent"]))
+            consequent = tuple(sorted(row["consequent"]))
+            rule_key = (antecedent, consequent)
+            if rule_key not in seen_rules:
+                cursor.execute(f"""
+                    INSERT INTO {get_table_name('bundling_all')} (support, lift, confidence)
+                    VALUES (%s, %s, %s)
+                """, (row["support"], row["lift"], row["confidence"]))
+                id_bundling = cursor.lastrowid
 
-                if result1 and result2:
-                    id_barang_1 = result1[0]
-                    id_barang_2 = result2[0]
-                    cursor.execute(f"""
-                        INSERT INTO {get_table_name('bundling_all')} (id_barang_1, id_barang_2, support, lift, confidence)
-                        VALUES (%s, %s, %s, %s, %s)
-                    """, (id_barang_1, id_barang_2, row["support"], row["lift"], row["confidence"]))
-                    seen_pairs.add(pair)
+                for ant_item in row["antecedent"]:
+                    cursor.execute(f"SELECT id_barang FROM {get_table_name('barang')} WHERE deskripsi_brg = %s", (ant_item,))
+                    result = cursor.fetchone()
+                    if result:
+                        cursor.execute(f"""
+                            INSERT IGNORE INTO {get_table_name('bundling_all', is_item_table=True)} (id_bundling, id_barang, role)
+                            VALUES (%s, %s, %s)
+                        """, (id_bundling, result[0], 'antecedent'))
+
+                for con_item in row["consequent"]:
+                    cursor.execute(f"SELECT id_barang FROM {get_table_name('barang')} WHERE deskripsi_brg = %s", (con_item,))
+                    result = cursor.fetchone()
+                    if result:
+                        cursor.execute(f"""
+                            INSERT IGNORE INTO {get_table_name('bundling_all', is_item_table=True)} (id_bundling, id_barang, role)
+                            VALUES (%s, %s, %s)
+                        """, (id_bundling, result[0], 'consequent'))
+
+                seen_rules.add(rule_key)
 
         conn.commit()
-        st.success(f"✅ Hasil bundling ({st.session_state.bundling_type}) berhasil disimpan ke tabel `{get_table_name('bundling_all')}`.")
+        st.success(f"✅ Hasil bundling ({st.session_state.bundling_type}) berhasil disimpan ke tabel `{get_table_name('bundling_all')}` dan `{get_table_name('bundling_all', is_item_table=True)}`.")
     except Exception as e:
         st.error(f"❌ Error in run_fp_growth_and_store_to_db: {str(e)}")
         raise
@@ -356,7 +402,7 @@ def run_bundling_similarity_and_store_to_db():
 
         cursor.execute(f"SELECT * FROM {get_table_name('bundling_all')}")
         bundling_data = cursor.fetchall()
-        bundling_df = pd.DataFrame(bundling_data, columns=["id_bundling", "id_barang_1", "id_barang_2", "support", "lift", "confidence"])
+        bundling_df = pd.DataFrame(bundling_data, columns=["id_bundling", "support", "lift", "confidence"])
 
         cursor.execute(f"SELECT id_barang_1, id_barang_2 FROM {get_table_name('similarity')}")
         similarity_data = cursor.fetchall()
@@ -378,53 +424,65 @@ def run_bundling_similarity_and_store_to_db():
         perubahan_data = []
 
         cursor.execute(f"DELETE FROM {get_table_name('bundling_similarity')}")
+        cursor.execute(f"DELETE FROM {get_table_name('bundling_similarity', is_item_table=True)}")
         cursor.execute(f"ALTER TABLE {get_table_name('bundling_similarity')} AUTO_INCREMENT = 1")
         cursor.execute(f"DELETE FROM {get_table_name('perubahan_bundling')}")
         cursor.execute(f"ALTER TABLE {get_table_name('perubahan_bundling')} AUTO_INCREMENT = 1")
 
-        seen_pairs = set()
+        seen_rules = set()
         for _, row in bundling_df.iterrows():
             id_bundling = int(row["id_bundling"])
-            id_1_old = int(row["id_barang_1"])
-            id_2_old = int(row["id_barang_2"])
-            support = row["support"]
-            lift = row["lift"]
-            confidence = row["confidence"]
+            support = float(row["support"]) if pd.notna(row["support"]) else None
+            lift = float(row["lift"]) if pd.notna(row["lift"]) else None
+            confidence = float(row["confidence"]) if pd.notna(row["confidence"]) else None
 
-            support = float(support) if pd.notna(support) else None
-            lift = float(lift) if pd.notna(lift) else None
-            confidence = float(confidence) if pd.notna(confidence) else None
+            cursor.execute(f"SELECT id_barang, role FROM {get_table_name('bundling_all', is_item_table=True)} WHERE id_bundling = %s", (id_bundling,))
+            items = cursor.fetchall()
+            antecedents_old = [item[0] for item in items if item[1] == 'antecedent']
+            consequents_old = [item[0] for item in items if item[1] == 'consequent']
 
-            id_1_new = id_1_old
-            id_2_new = id_2_old
-            replaced = False
-
-            pair = tuple(sorted([id_1_old, id_2_old]))
-            if pair in seen_pairs:
+            rule_key = (tuple(sorted(antecedents_old)), tuple(sorted(consequents_old)))
+            if rule_key in seen_rules:
                 continue
 
-            replacement_1 = similarity_df[similarity_df["sold_together"] == id_1_old]
-            if not replacement_1.empty:
-                id_1_new = int(replacement_1.iloc[0]["deadstock"])
-                replaced = True
+            antecedents_new = antecedents_old.copy()
+            consequents_new = consequents_old.copy()
+            replaced = False
 
-            elif not replaced:
-                replacement_2 = similarity_df[similarity_df["sold_together"] == id_2_old]
-                if not replacement_2.empty:
-                    id_2_new = int(replacement_2.iloc[0]["deadstock"])
+            for i, ant_id in enumerate(antecedents_old):
+                replacement = similarity_df[similarity_df["sold_together"] == ant_id]
+                if not replacement.empty:
+                    antecedents_new[i] = int(replacement.iloc[0]["deadstock"])
                     replaced = True
+                    break
+
+            if not replaced:
+                for i, con_id in enumerate(consequents_old):
+                    replacement = similarity_df[similarity_df["sold_together"] == con_id]
+                    if not replacement.empty:
+                        consequents_new[i] = int(replacement.iloc[0]["deadstock"])
+                        replaced = True
+                        break
 
             if replaced:
                 cursor.execute(f"""
-                    INSERT INTO {get_table_name('bundling_similarity')} (id_barang_1, id_barang_2, support, lift, confidence)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (
-                    id_1_new,
-                    id_2_new,
-                    support,
-                    lift,
-                    confidence
-                ))
+                    INSERT INTO {get_table_name('bundling_similarity')} (support, lift, confidence)
+                    VALUES (%s, %s, %s)
+                """, (support, lift, confidence))
+                new_id_bundling = cursor.lastrowid
+
+                for ant_id in antecedents_new:
+                    cursor.execute(f"""
+                        INSERT IGNORE INTO {get_table_name('bundling_similarity', is_item_table=True)} (id_bundling, id_barang, role)
+                        VALUES (%s, %s, %s)
+                    """, (new_id_bundling, ant_id, 'antecedent'))
+
+                for con_id in consequents_new:
+                    cursor.execute(f"""
+                        INSERT IGNORE INTO {get_table_name('bundling_similarity', is_item_table=True)} (id_bundling, id_barang, role)
+                        VALUES (%s, %s, %s)
+                    """, (new_id_bundling, con_id, 'consequent'))
+
                 replaced_count += 1
 
                 cursor.execute(f"""
@@ -432,20 +490,20 @@ def run_bundling_similarity_and_store_to_db():
                     VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 """, (
                     id_bundling,
-                    id_1_old,
-                    id_2_old,
-                    id_1_new,
-                    id_2_new
+                    antecedents_old[0] if antecedents_old else None,
+                    consequents_old[0] if consequents_old else None,
+                    antecedents_new[0] if antecedents_new else None,
+                    consequents_new[0] if consequents_new else None
                 ))
 
                 perubahan_data.append({
                     "ID Bundling": id_bundling,
-                    "Produk 1 Lama": id_to_name.get(id_1_old, f"ID {id_1_old}"),
-                    "Produk 2 Lama": id_to_name.get(id_2_old, f"ID {id_2_old}"),
-                    "Produk 1 Baru": id_to_name.get(id_1_new, f"ID {id_1_new}"),
-                    "Produk 2 Baru": id_to_name.get(id_2_new, f"ID {id_2_new}")
+                    "Antecedent Lama": ", ".join([id_to_name.get(id, f"ID {id}") for id in antecedents_old]),
+                    "Consequent Lama": ", ".join([id_to_name.get(id, f"ID {id}") for id in consequents_old]),
+                    "Antecedent Baru": ", ".join([id_to_name.get(id, f"ID {id}") for id in antecedents_new]),
+                    "Consequent Baru": ", ".join([id_to_name.get(id, f"ID {id}") for id in consequents_new])
                 })
-                seen_pairs.add(pair)
+                seen_rules.add(rule_key)
 
         conn.commit()
         st.success(f"{replaced_count} bundling entries ({st.session_state.bundling_type}) berhasil dimasukkan ke `{get_table_name('bundling_similarity')}` dan perubahan tercatat.")
@@ -515,43 +573,52 @@ def run_deadstock_fpgrowth_to_db():
         )]
 
         cursor.execute(f"DELETE FROM {get_table_name('bundling_ds')}")
+        cursor.execute(f"DELETE FROM {get_table_name('bundling_ds', is_item_table=True)}")
         cursor.execute(f"ALTER TABLE {get_table_name('bundling_ds')} AUTO_INCREMENT = 1")
 
-        seen_pairs = set()
+        seen_rules = set()
         inserted = 0
         for _, row in rules_df.iterrows():
-            ant = row["antecedent"]
-            con = row["consequent"]
+            antecedent = tuple(sorted(row["antecedent"]))
+            consequent = tuple(sorted(row["consequent"]))
+            rule_key = (antecedent, consequent)
+            if rule_key not in seen_rules:
+                cursor.execute(f"""
+                    INSERT INTO {get_table_name('bundling_ds')} (support, confidence, lift)
+                    VALUES (%s, %s, %s)
+                """, (float(row["support"]), float(row["confidence"]), float(row["lift"])))
+                id_bundling = cursor.lastrowid
 
-            if len(ant) == 1 and len(con) == 1:
-                pair = tuple(sorted([ant[0], con[0]]))
-                if pair not in seen_pairs:
-                    cursor.execute(f"SELECT id_barang FROM {get_table_name('barang')} WHERE deskripsi_brg = %s", (ant[0],))
-                    result1 = cursor.fetchone()
-                    cursor.execute(f"SELECT id_barang FROM {get_table_name('barang')} WHERE deskripsi_brg = %s", (con[0],))
-                    result2 = cursor.fetchone()
-
-                    if result1 and result2:
-                        id_barang_1, id_barang_2 = result1[0], result2[0]
-
+                for ant_item in row["antecedent"]:
+                    cursor.execute(f"SELECT id_barang FROM {get_table_name('barang')} WHERE deskripsi_brg = %s", (ant_item,))
+                    result = cursor.fetchone()
+                    if result:
                         cursor.execute(f"""
-                            INSERT INTO {get_table_name('bundling_ds')} (id_barang_1, id_barang_2, support, confidence, lift)
-                            VALUES (%s, %s, %s, %s, %s)
-                        """, (
-                            id_barang_1, id_barang_2,
-                            float(row["support"]), float(row["confidence"]), float(row["lift"])
-                        ))
-                        inserted += 1
-                        seen_pairs.add(pair)
+                            INSERT IGNORE INTO {get_table_name('bundling_ds', is_item_table=True)} (id_bundling, id_barang, role)
+                            VALUES (%s, %s, %s)
+                        """, (id_bundling, result[0], 'antecedent'))
+
+                for con_item in row["consequent"]:
+                    cursor.execute(f"SELECT id_barang FROM {get_table_name('barang')} WHERE deskripsi_brg = %s", (con_item,))
+                    result = cursor.fetchone()
+                    if result:
+                        cursor.execute(f"""
+                            INSERT IGNORE INTO {get_table_name('bundling_ds', is_item_table=True)} (id_bundling, id_barang, role)
+                            VALUES (%s, %s, %s)
+                        """, (id_bundling, result[0], 'consequent'))
+
+                inserted += 1
+                seen_rules.add(rule_key)
 
         conn.commit()
-        st.success(f"✅ {inserted} bundling FP-Growth deadstock ({st.session_state.bundling_type}) berhasil disimpan ke tabel `{get_table_name('bundling_ds')}`.")
+        st.success(f"✅ {inserted} bundling FP-Growth deadstock ({st.session_state.bundling_type}) berhasil disimpan ke tabel `{get_table_name('bundling_ds')}` dan `{get_table_name('bundling_ds', is_item_table=True)}`.")
     except Exception as e:
         st.error(f"❌ Error in run_deadstock_fpgrowth_to_db: {str(e)}")
         raise
     finally:
         cursor.close()
         conn.close()
+        spark.stop()
 
 def check_all_tables_have_data():
     try:
@@ -573,8 +640,10 @@ def check_all_tables_have_data():
         cursor.execute(f"""
             SELECT COUNT(*) 
             FROM {get_table_name('bundling_all')} ba
-            LEFT JOIN {get_table_name('barang')} b1 ON ba.id_barang_1 = b1.id_barang
-            LEFT JOIN {get_table_name('barang')} b2 ON ba.id_barang_2 = b2.id_barang
+            JOIN {get_table_name('bundling_all', is_item_table=True)} bi1 ON ba.id_bundling = bi1.id_bundling AND bi1.role = 'antecedent'
+            JOIN {get_table_name('bundling_all', is_item_table=True)} bi2 ON ba.id_bundling = bi2.id_bundling AND bi2.role = 'consequent'
+            LEFT JOIN {get_table_name('barang')} b1 ON bi1.id_barang = b1.id_barang
+            LEFT JOIN {get_table_name('barang')} b2 ON bi2.id_barang = b2.id_barang
             WHERE b1.id_barang IS NULL OR b2.id_barang IS NULL
         """)
         invalid_bundling_all = cursor.fetchone()[0]
@@ -582,8 +651,10 @@ def check_all_tables_have_data():
         cursor.execute(f"""
             SELECT COUNT(*) 
             FROM {get_table_name('bundling_similarity')} bs
-            LEFT JOIN {get_table_name('barang')} b1 ON bs.id_barang_1 = b1.id_barang
-            LEFT JOIN {get_table_name('barang')} b2 ON bs.id_barang_2 = b2.id_barang
+            JOIN {get_table_name('bundling_similarity', is_item_table=True)} bi1 ON bs.id_bundling = bi1.id_bundling AND bi1.role = 'antecedent'
+            JOIN {get_table_name('bundling_similarity', is_item_table=True)} bi2 ON bs.id_bundling = bi2.id_bundling AND bi2.role = 'consequent'
+            LEFT JOIN {get_table_name('barang')} b1 ON bi1.id_barang = b1.id_barang
+            LEFT JOIN {get_table_name('barang')} b2 ON bi2.id_barang = b2.id_barang
             WHERE b1.id_barang IS NULL OR b2.id_barang IS NULL
         """)
         invalid_bundling_similarity = cursor.fetchone()[0]
@@ -591,8 +662,10 @@ def check_all_tables_have_data():
         cursor.execute(f"""
             SELECT COUNT(*) 
             FROM {get_table_name('bundling_ds')} bd
-            LEFT JOIN {get_table_name('barang')} b1 ON bd.id_barang_1 = b1.id_barang
-            LEFT JOIN {get_table_name('barang')} b2 ON bd.id_barang_2 = b2.id_barang
+            JOIN {get_table_name('bundling_ds', is_item_table=True)} bi1 ON bd.id_bundling = bi1.id_bundling AND bi1.role = 'antecedent'
+            JOIN {get_table_name('bundling_ds', is_item_table=True)} bi2 ON bd.id_bundling = bi2.id_bundling AND bi2.role = 'consequent'
+            LEFT JOIN {get_table_name('barang')} b1 ON bi1.id_barang = b1.id_barang
+            LEFT JOIN {get_table_name('barang')} b2 ON bi2.id_barang = b2.id_barang
             WHERE b1.id_barang IS NULL OR b2.id_barang IS NULL
         """)
         invalid_bundling_ds = cursor.fetchone()[0]
@@ -622,12 +695,17 @@ def clear_all_tables():
             "deadstock", "penjualan", "rfm", "category", "barang"
         ]
         
+        item_tables = [
+            "bundling_all_item", "bundling_similarity_item", "bundling_ds_item"
+        ]
+        
         cursor.execute("SET FOREIGN_KEY_CHECKS = 0")
         
-        for table in tables:
-            cursor.execute(f"DELETE FROM {get_table_name(table)}")
-            cursor.execute(f"ALTER TABLE {get_table_name(table)} AUTO_INCREMENT = 1")
-            print(f"[DEBUG] Data dihapus dan auto-increment direset untuk tabel {get_table_name(table)}")
+        for table in tables + item_tables:
+            full_table_name = get_table_name(table) if table not in item_tables else get_table_name(table.split('_item')[0], is_item_table=True)
+            cursor.execute(f"DELETE FROM {full_table_name}")
+            cursor.execute(f"ALTER TABLE {full_table_name} AUTO_INCREMENT = 1")
+            print(f"[DEBUG] Data dihapus dan auto-increment direset untuk tabel {full_table_name}")
         
         cursor.execute("SET FOREIGN_KEY_CHECKS = 1")
         
@@ -719,7 +797,7 @@ if st.session_state.wizard_step == 0:
             st.write(f"[DEBUG] Step 0: 'Lanjut' button clicked, bundling_type={st.session_state.bundling_type}")
             next_step()
     with col3:
-        if  check_platform_data(bundling_type):
+        if check_platform_data(bundling_type):
             if st.button("🔍 Lihat Hasil Bundling Terakhir", key="step0_to_step4"):
                 st.write("[DEBUG] Step 0: 'Lihat Hasil' button clicked")
                 go_to_step_4()
@@ -1001,6 +1079,7 @@ elif st.session_state.wizard_step == 3:
             st.session_state.analysis_running = True
             try:
                 clear_all_tables()
+                ensure_correct_item_table_schema()  # Pastikan skema tabel benar sebelum analisis
                 selected_file = st.session_state.selected_file
                 selected_sheet = st.session_state.selected_sheet
                 tahun_tren = st.session_state.tahun_tren
@@ -1098,6 +1177,8 @@ elif st.session_state.wizard_step == 3:
                     cursor.execute(f"ALTER TABLE {get_table_name('similarity')} AUTO_INCREMENT = 1")
                     cursor.execute(f"DELETE FROM {get_table_name('bundling_similarity')}")
                     cursor.execute(f"ALTER TABLE {get_table_name('bundling_similarity')} AUTO_INCREMENT = 1")
+                    cursor.execute(f"DELETE FROM {get_table_name('bundling_similarity', is_item_table=True)}")
+                    cursor.execute(f"ALTER TABLE {get_table_name('bundling_similarity', is_item_table=True)} AUTO_INCREMENT = 1")
 
                     conn.commit()
 
@@ -1177,7 +1258,7 @@ elif st.session_state.wizard_step == 3:
 
                     cursor.execute("SET FOREIGN_KEY_CHECKS = 1")
 
-                    process_rfm_from_db(tahun_tren)
+                    process_rfm_from_db(1)
                     run_fp_growth_and_store_to_db()
                     run_similarity_and_store_to_db()
                     run_bundling_similarity_and_store_to_db()
@@ -1186,7 +1267,8 @@ elif st.session_state.wizard_step == 3:
                     st.session_state.analysis_done = True
                     st.session_state.analysis_running = False
                     st.success("✅ Analisis selesai! Lanjut ke langkah berikutnya untuk melihat hasil.")
-                    st.write("[DEBUG] Analysis completed, analysis_done set to True")
+                    st.session_state.wizard_step = 4
+                    st.rerun()
 
                 except Exception as e:
                     conn.rollback()
@@ -1211,11 +1293,6 @@ elif st.session_state.wizard_step == 3:
             if st.button("Kembali", key="step3_prev"):
                 st.write("[DEBUG] Step 3: 'Kembali' button clicked")
                 prev_step()
-        with col2:
-            if st.button("Lanjut", key="step愣_next", disabled=not st.session_state.analysis_done):
-                st.write("[DEBUG] Step 3: 'Lanjut' button clicked")
-                st.session_state.wizard_step = 4
-                st.rerun()
         with col3:
             if st.session_state.analysis_done:
                 if st.button("🔍 Lihat Hasil Bundling Terakhir", key="step3_to_step4"):
@@ -1234,7 +1311,6 @@ elif st.session_state.wizard_step == 4:
     st.header("Langkah 4: Hasil Analisis")
     st.write(f"[DEBUG] Entered Step 4, analysis_done={st.session_state.analysis_done}")
     
-    # Dropdown untuk memilih platform
     view_platform = st.selectbox(
         "Pilih platform untuk melihat hasil:",
         options=["General", "Shopee", "Tokopedia", "Lazada"],
@@ -1242,7 +1318,6 @@ elif st.session_state.wizard_step == 4:
         key="view_platform_step4"
     )
     
-    # Periksa apakah data tersedia untuk platform yang dipilih
     if not check_platform_data(view_platform):
         st.warning(f"⚠️ Data untuk platform {view_platform} belum tersedia. Silakan jalankan analisis untuk platform tersebut terlebih dahulu.")
     else:
@@ -1254,20 +1329,19 @@ elif st.session_state.wizard_step == 4:
                 conn = connect_db()
                 df_bundling = pd.read_sql(f"""
                     SELECT 
-                        b1.deskripsi_brg AS Produk_1,
-                        c1.category AS Kategori_1,
-                        b2.deskripsi_brg AS Produk_2,
-                        c2.category AS Kategori_2,
+                        GROUP_CONCAT(DISTINCT CASE WHEN bi.role = 'antecedent' THEN b.deskripsi_brg END SEPARATOR ', ') AS Antecedent,
+                        GROUP_CONCAT(DISTINCT CASE WHEN bi.role = 'consequent' THEN b.deskripsi_brg END SEPARATOR ', ') AS Consequent,
+                        GROUP_CONCAT(DISTINCT CASE WHEN bi.role = 'antecedent' THEN c.category END SEPARATOR ', ') AS Kategori_Antecedent,
+                        GROUP_CONCAT(DISTINCT CASE WHEN bi.role = 'consequent' THEN c.category END SEPARATOR ', ') AS Kategori_Consequent,
                         ba.support,
                         ba.lift,
                         ba.confidence
                     FROM {get_table_name('bundling_all', view_platform)} ba
-                    JOIN {get_table_name('barang', view_platform)} b1 ON ba.id_barang_1 = b1.id_barang
-                    JOIN {get_table_name('barang', view_platform)} b2 ON ba.id_barang_2 = b2.id_barang
-                    JOIN {get_table_name('rfm', view_platform)} r1 ON b1.id_barang = r1.id_barang
-                    JOIN {get_table_name('rfm', view_platform)} r2 ON b2.id_barang = r2.id_barang
-                    JOIN {get_table_name('category')} c1 ON r1.id_category = c1.id_category
-                    JOIN {get_table_name('category')} c2 ON r2.id_category = c2.id_category
+                    JOIN {get_table_name('bundling_all', view_platform, True)} bi ON ba.id_bundling = bi.id_bundling
+                    JOIN {get_table_name('barang', view_platform)} b ON bi.id_barang = b.id_barang
+                    LEFT JOIN {get_table_name('rfm', view_platform)} r ON b.id_barang = r.id_barang
+                    LEFT JOIN {get_table_name('category')} c ON r.id_category = c.id_category
+                    GROUP BY ba.id_bundling, ba.support, ba.lift, ba.confidence
                     ORDER BY ba.support DESC;
                 """, conn)
                 st.dataframe(df_bundling)
@@ -1283,14 +1357,16 @@ elif st.session_state.wizard_step == 4:
                 conn = connect_db()
                 df_bundling_similarity = pd.read_sql(f"""
                     SELECT 
-                        b1_new.deskripsi_brg AS Produk_1,
-                        b2_new.deskripsi_brg AS Produk_2,
+                        bs.id_bundling,
                         bs.support,
                         bs.lift,
-                        bs.confidence
+                        bs.confidence,
+                        GROUP_CONCAT(DISTINCT CASE WHEN bi.role = 'antecedent' THEN b.deskripsi_brg END SEPARATOR ', ') AS Antecedent,
+                        GROUP_CONCAT(DISTINCT CASE WHEN bi.role = 'consequent' THEN b.deskripsi_brg END SEPARATOR ', ') AS Consequent
                     FROM {get_table_name('bundling_similarity', view_platform)} bs
-                    JOIN {get_table_name('barang', view_platform)} b1_new ON bs.id_barang_1 = b1_new.id_barang
-                    JOIN {get_table_name('barang', view_platform)} b2_new ON bs.id_barang_2 = b2_new.id_barang
+                    JOIN {get_table_name('bundling_similarity', view_platform, True)} bi ON bs.id_bundling = bi.id_bundling
+                    JOIN {get_table_name('barang', view_platform)} b ON bi.id_barang = b.id_barang
+                    GROUP BY bs.id_bundling, bs.support, bs.lift, bs.confidence
                     ORDER BY bs.support DESC;
                 """, conn)
                 st.dataframe(df_bundling_similarity)
@@ -1306,20 +1382,19 @@ elif st.session_state.wizard_step == 4:
                 conn = connect_db()
                 df_bundling = pd.read_sql(f"""
                     SELECT 
-                        b1.deskripsi_brg AS Produk_1,
-                        COALESCE(c1.category, 'Deadstock (Non-Moving Products)') AS Kategori_1,
-                        b2.deskripsi_brg AS Produk_2,
-                        COALESCE(c2.category, 'Deadstock (Non-Moving Products)') AS Kategori_2,
+                        GROUP_CONCAT(DISTINCT CASE WHEN bi.role = 'antecedent' THEN b.deskripsi_brg END SEPARATOR ', ') AS Antecedent,
+                        GROUP_CONCAT(DISTINCT CASE WHEN bi.role = 'consequent' THEN b.deskripsi_brg END SEPARATOR ', ') AS Consequent,
+                        GROUP_CONCAT(DISTINCT CASE WHEN bi.role = 'antecedent' THEN COALESCE(c.category, 'Deadstock (Non-Moving Products)') END SEPARATOR ', ') AS Kategori_Antecedent,
+                        GROUP_CONCAT(DISTINCT CASE WHEN bi.role = 'consequent' THEN COALESCE(c.category, 'Deadstock (Non-Moving Products)') END SEPARATOR ', ') AS Kategori_Consequent,
                         ba.support,
                         ba.lift,
                         ba.confidence
                     FROM {get_table_name('bundling_ds', view_platform)} ba
-                    JOIN {get_table_name('barang', view_platform)} b1 ON ba.id_barang_1 = b1.id_barang
-                    JOIN {get_table_name('barang', view_platform)} b2 ON ba.id_barang_2 = b2.id_barang
-                    LEFT JOIN {get_table_name('rfm', view_platform)} r1 ON b1.id_barang = r1.id_barang
-                    LEFT JOIN {get_table_name('rfm', view_platform)} r2 ON b2.id_barang = r2.id_barang
-                    LEFT JOIN {get_table_name('category')} c1 ON r1.id_category = c1.id_category
-                    LEFT JOIN {get_table_name('category')} c2 ON r2.id_category = c2.id_category
+                    JOIN {get_table_name('bundling_ds', view_platform, True)} bi ON ba.id_bundling = bi.id_bundling
+                    JOIN {get_table_name('barang', view_platform)} b ON bi.id_barang = b.id_barang
+                    LEFT JOIN {get_table_name('rfm', view_platform)} r ON b.id_barang = r.id_barang
+                    LEFT JOIN {get_table_name('category')} c ON r.id_category = c.id_category
+                    GROUP BY ba.id_bundling, ba.support, ba.lift, ba.confidence
                     ORDER BY ba.support DESC;
                 """, conn)
                 st.dataframe(df_bundling)
@@ -1329,7 +1404,6 @@ elif st.session_state.wizard_step == 4:
                 if 'conn' in locals():
                     conn.close()
 
-    # Tombol "Mulai Ulang" selalu muncul
     col1, col2 = st.columns(2)
     with col2:
         if st.button("Mulai Ulang", key="restart_step4"):
