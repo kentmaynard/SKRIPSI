@@ -63,7 +63,7 @@ def ensure_correct_item_table_schema():
         if 'conn' in locals():
             conn.close()
 
-def check_platform_data(platform):
+def check_platform_data(platform): # mengecek apakah ada data bundling yang tersimpan di tabel tertentu untuk sebuah platform
     try:
         conn = connect_db()
         cursor = conn.cursor()
@@ -86,7 +86,7 @@ def check_platform_data(platform):
         if 'conn' in locals():
             conn.close()
 
-# Fungsi untuk memeriksa apakah tabel memiliki data
+# Fungsi untuk memeriksa apakah tabel memiliki data || Untuk menentukan apakah ada data bundling yang siap digunakan atau ditampilkan di aplikasi
 def check_tables_have_data():
     try:
         conn = connect_db()
@@ -124,44 +124,84 @@ def get_fp_growth_ds_params(bundling_type):
     }
     return params.get(bundling_type, {"minSupport": 0.005, "minConfidence": 0.5})
 
-# Fungsi scoring RFM
-def score_recency(days, years):
-    if days == 0:
-        return 5
-    elif 1*years <= days <= 7*years:
-        return 4
-    elif 8*years <= days <= 30*years:
-        return 3
-    elif 31*years <= days <= 90*years:
-        return 2
-    else:
-        return 1
+# # Fungsi scoring RFM
+# def score_recency(days, years):
+#     if days == 0:
+#         return 5
+#     elif 1*years <= days <= 7*years:
+#         return 4
+#     elif 8*years <= days <= 30*years:
+#         return 3
+#     elif 31*years <= days <= 90*years:
+#         return 2
+#     else:
+#         return 1
 
-def score_frequency(freq, years):
-    freq_per_year = freq / years
-    if freq_per_year >= 1200:
-        return 5
-    elif freq_per_year >= 600:
-        return 4
-    elif freq_per_year >= 300:
-        return 3
-    elif freq_per_year >= 120:
-        return 2
-    else:
-        return 1
+# def score_frequency(freq, years):
+#     freq_per_year = freq / years
+#     if freq_per_year >= 1200:
+#         return 5
+#     elif freq_per_year >= 600:
+#         return 4
+#     elif freq_per_year >= 300:
+#         return 3
+#     elif freq_per_year >= 120:
+#         return 2
+#     else:
+#         return 1
 
-def score_monetary(amount, years):
-    amount_per_year = amount / years
-    if amount_per_year >= 6000:
-        return 5
-    elif amount_per_year >= 3000:
-        return 4
-    elif amount_per_year >= 1200:
-        return 3
-    elif amount_per_year >= 120:
-        return 2
-    else:
-        return 1
+# def score_monetary(amount, years):
+#     amount_per_year = amount / years
+#     if amount_per_year >= 6000:
+#         return 5
+#     elif amount_per_year >= 3000:
+#         return 4
+#     elif amount_per_year >= 1200:
+#         return 3
+#     elif amount_per_year >= 120:
+#         return 2
+#     else:
+#         return 1
+
+# Define type keywords for product type mapping
+type_keywords = {
+    'chainsaw': ['CHAINSAW', 'CHAIN SAW'],
+    'accessories': ['ACCESORIS', 'AKSESORIS', 'CUCI GDG B', 'LAKER', 'SELANG', 'BAUT'],
+    'powertool': ['POWER TOOLS', 'PT'],
+    'teknik': ['TEKNIK'],
+    'welding': ['WELDING'],
+    'lubricant': ['LUBRICANT'],
+    'mesin': ['MESIN', 'DIESEL', 'SPARE PART']
+}
+
+# Define scoring thresholds for Frequency and Monetary per product type
+f_thresholds = {
+    'powertool': [1200, 300, 100, 50],
+    'teknik': [600, 150, 50, 25],
+    'accessories': [300, 75, 25, 12],
+    'mesin': [1200, 300, 100, 50],
+    'chainsaw': [600, 150, 50, 25],
+    'lubricant': [1200, 300, 100, 50],
+    'welding': [600, 150, 50, 25]
+}
+
+m_thresholds = {
+    'powertool': [2500, 600, 200, 100],
+    'teknik': [1250, 300, 100, 50],
+    'accessories': [600, 150, 50, 25],
+    'mesin': [2500, 600, 200, 100],
+    'chainsaw': [1250, 300, 100, 50],
+    'lubricant': [2500, 600, 200, 100],
+    'welding': [1250, 300, 100, 50]
+}
+
+# Function to determine product type based on jenis_barang
+def get_product_type(jenis_barang):
+    jenis_barang = str(jenis_barang).upper()
+    for type_, keywords in type_keywords.items():
+        if any(keyword in jenis_barang for keyword in keywords):
+            return type_
+    return 'other'
 
 def categorize_product(row):
     R, F, M = row["R_Score"], row["F_Score"], row["M_Score"]
@@ -184,35 +224,123 @@ def categorize_product(row):
     else:
         return "Uncategorized"
 
+def get_score(value, thresholds):
+    if value >= thresholds[0]:
+        return 5
+    elif value >= thresholds[1]:
+        return 4
+    elif value >= thresholds[2]:
+        return 3
+    elif value >= thresholds[3]:
+        return 2
+    else:
+        return 1
+
+# def process_rfm_from_db(tahun_tren):
+#     try:
+#         conn = connect_db()
+#         cursor = conn.cursor()
+
+#         cursor.execute(f"""
+#             SELECT p.id_barang, b.deskripsi_brg, p.tanggal, p.kode_nota, p.jml
+#             FROM {get_table_name('penjualan')} p
+#             JOIN {get_table_name('barang')} b ON p.id_barang = b.id_barang
+#         """)
+#         data = cursor.fetchall()
+
+#         df = pd.DataFrame(data, columns=["id_barang", "deskripsi_brg", "tanggal", "kode_nota", "jml"])
+#         df["tanggal"] = pd.to_datetime(df["tanggal"])
+#         reference_date = df["tanggal"].max()
+#         cutoff_date = reference_date - pd.DateOffset(years=tahun_tren)
+#         df_filtered = df[df["tanggal"] >= cutoff_date]
+
+#         rfm = df_filtered.groupby("deskripsi_brg").agg(
+#             Recency=("tanggal", lambda x: (reference_date - x.max()).days),
+#             Frequency=("kode_nota", "nunique"),
+#             Monetary=("jml", "sum")
+#         ).reset_index()
+
+#         rfm["R_Score"] = rfm["Recency"].apply(score_recency, args=(1,))
+#         rfm["F_Score"] = rfm["Frequency"].apply(score_frequency, args=(1,))
+#         rfm["M_Score"] = rfm["Monetary"].apply(score_monetary, args=(1,))
+#         rfm["Category"] = rfm.apply(categorize_product, axis=1)
+
+#         for _, row in rfm.iterrows():
+#             cursor.execute(f"SELECT id_category FROM {get_table_name('category')} WHERE category = %s", (row["Category"],))
+#             category_result = cursor.fetchone()
+#             if category_result:
+#                 id_category = category_result[0]
+#             else:
+#                 cursor.execute(f"INSERT INTO {get_table_name('category')} (category) VALUES (%s)", (row["Category"],))
+#                 id_category = cursor.lastrowid
+
+#             cursor.execute(f"""
+#                 INSERT INTO {get_table_name('rfm')} (recency, frequency, monetary, r_score, f_score, m_score, id_barang, id_category)
+#                 VALUES (%s, %s, %s, %s, %s, %s, 
+#                         (SELECT id_barang FROM {get_table_name('barang')} WHERE deskripsi_brg = %s), %s)
+#             """, (
+#                 row["Recency"], row["Frequency"], row["Monetary"],
+#                 row["R_Score"], row["F_Score"], row["M_Score"],
+#                 row["deskripsi_brg"], id_category
+#             ))
+
+#         conn.commit()
+#         st.success("✅ RFM dan kategori berhasil dihitung dan disimpan ke database.")
+#     except Exception as e:
+#         st.error(f"❌ Error in process_rfm_from_db: {str(e)}")
+#         raise
+#     finally:
+#         cursor.close()
+#         conn.close()
+
 def process_rfm_from_db(tahun_tren):
     try:
         conn = connect_db()
         cursor = conn.cursor()
 
+        # Fetch data including jenis_barang
         cursor.execute(f"""
-            SELECT p.id_barang, b.deskripsi_brg, p.tanggal, p.kode_nota, p.jml
+            SELECT p.id_barang, b.deskripsi_brg, b.jenis_barang, p.tanggal, p.kode_nota, p.jml
             FROM {get_table_name('penjualan')} p
             JOIN {get_table_name('barang')} b ON p.id_barang = b.id_barang
         """)
         data = cursor.fetchall()
 
-        df = pd.DataFrame(data, columns=["id_barang", "deskripsi_brg", "tanggal", "kode_nota", "jml"])
+        df = pd.DataFrame(data, columns=["id_barang", "deskripsi_brg", "jenis_barang", "tanggal", "kode_nota", "jml"])
         df["tanggal"] = pd.to_datetime(df["tanggal"])
         reference_date = df["tanggal"].max()
         cutoff_date = reference_date - pd.DateOffset(years=tahun_tren)
         df_filtered = df[df["tanggal"] >= cutoff_date]
 
-        rfm = df_filtered.groupby("deskripsi_brg").agg(
+        # Group by id_barang for unique products
+        rfm = df_filtered.groupby("id_barang").agg(
             Recency=("tanggal", lambda x: (reference_date - x.max()).days),
             Frequency=("kode_nota", "nunique"),
-            Monetary=("jml", "sum")
+            Monetary=("jml", "sum"),
+            deskripsi_brg=("deskripsi_brg", "first"),
+            jenis_barang=("jenis_barang", "first")
         ).reset_index()
 
-        rfm["R_Score"] = rfm["Recency"].apply(score_recency, args=(1,))
-        rfm["F_Score"] = rfm["Frequency"].apply(score_frequency, args=(1,))
-        rfm["M_Score"] = rfm["Monetary"].apply(score_monetary, args=(1,))
+        # Assign product type
+        rfm["product_type"] = rfm["jenis_barang"].apply(get_product_type)
+
+        # Set R_Score to a constant value of 5
+        rfm["R_Score"] = 5
+
+        # Calculate F_Score and M_Score based on product type
+        rfm["F_Score"] = rfm.apply(
+            lambda row: get_score(row["Frequency"], f_thresholds.get(row["product_type"], [0, 0, 0, 0])), 
+            axis=1
+        )
+        rfm["M_Score"] = rfm.apply(
+            lambda row: get_score(row["Monetary"], m_thresholds.get(row["product_type"], [0, 0, 0, 0])), 
+            axis=1
+        )
+
+        # Categorize products
         rfm["Category"] = rfm.apply(categorize_product, axis=1)
 
+        # Insert into database
         for _, row in rfm.iterrows():
             cursor.execute(f"SELECT id_category FROM {get_table_name('category')} WHERE category = %s", (row["Category"],))
             category_result = cursor.fetchone()
@@ -224,12 +352,11 @@ def process_rfm_from_db(tahun_tren):
 
             cursor.execute(f"""
                 INSERT INTO {get_table_name('rfm')} (recency, frequency, monetary, r_score, f_score, m_score, id_barang, id_category)
-                VALUES (%s, %s, %s, %s, %s, %s, 
-                        (SELECT id_barang FROM {get_table_name('barang')} WHERE deskripsi_brg = %s), %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 row["Recency"], row["Frequency"], row["Monetary"],
                 row["R_Score"], row["F_Score"], row["M_Score"],
-                row["deskripsi_brg"], id_category
+                row["id_barang"], id_category
             ))
 
         conn.commit()
@@ -348,7 +475,7 @@ def run_similarity_and_store_to_db():
 
         similarity_scores = similarity_matrix[:len(sold_df), len(sold_df):]
 
-        threshold = 0.5
+        threshold = 0.3
         inserted = 0
 
         cursor.execute(f"DELETE FROM {get_table_name('similarity')}")
@@ -426,8 +553,6 @@ def run_bundling_similarity_and_store_to_db():
         cursor.execute(f"DELETE FROM {get_table_name('bundling_similarity')}")
         cursor.execute(f"DELETE FROM {get_table_name('bundling_similarity', is_item_table=True)}")
         cursor.execute(f"ALTER TABLE {get_table_name('bundling_similarity')} AUTO_INCREMENT = 1")
-        cursor.execute(f"DELETE FROM {get_table_name('perubahan_bundling')}")
-        cursor.execute(f"ALTER TABLE {get_table_name('perubahan_bundling')} AUTO_INCREMENT = 1")
 
         seen_rules = set()
         for _, row in bundling_df.iterrows():
@@ -441,7 +566,7 @@ def run_bundling_similarity_and_store_to_db():
             antecedents_old = [item[0] for item in items if item[1] == 'antecedent']
             consequents_old = [item[0] for item in items if item[1] == 'consequent']
 
-            rule_key = (tuple(sorted(antecedents_old)), tuple(sorted(consequents_old)))
+            rule_key = (tuple(sorted(antecedents_old)), tuple(sorted(consequents_old))) 
             if rule_key in seen_rules:
                 continue
 
@@ -450,14 +575,14 @@ def run_bundling_similarity_and_store_to_db():
             replaced = False
 
             for i, ant_id in enumerate(antecedents_old):
-                replacement = similarity_df[similarity_df["sold_together"] == ant_id]
+                replacement = similarity_df[similarity_df["sold_together"] == ant_id] #ada ga sama di similarity
                 if not replacement.empty:
-                    antecedents_new[i] = int(replacement.iloc[0]["deadstock"])
+                    antecedents_new[i] = int(replacement.iloc[0]["deadstock"]) #direplace sama ds
                     replaced = True
                     break
 
             if not replaced:
-                for i, con_id in enumerate(consequents_old):
+                for i, con_id in enumerate(consequents_old): #coba di conseq
                     replacement = similarity_df[similarity_df["sold_together"] == con_id]
                     if not replacement.empty:
                         consequents_new[i] = int(replacement.iloc[0]["deadstock"])
@@ -485,16 +610,6 @@ def run_bundling_similarity_and_store_to_db():
 
                 replaced_count += 1
 
-                cursor.execute(f"""
-                    INSERT INTO {get_table_name('perubahan_bundling')} (id_bundling, id_barang_1_lama, id_barang_2_lama, id_barang_1_baru, id_barang_2_baru, waktu)
-                    VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                """, (
-                    id_bundling,
-                    antecedents_old[0] if antecedents_old else None,
-                    consequents_old[0] if consequents_old else None,
-                    antecedents_new[0] if antecedents_new else None,
-                    consequents_new[0] if consequents_new else None
-                ))
 
                 perubahan_data.append({
                     "ID Bundling": id_bundling,
@@ -564,7 +679,7 @@ def run_deadstock_fpgrowth_to_db():
         """, conn)
         rfm_dict = dict(zip(df_map["deskripsi_brg"], df_map["category"]))
 
-        def contains_deadstock(items):
+        def contains_deadstock(items): #pastikan ada ds minimal 1
             return any(rfm_dict.get(item, "") == "Deadstock (Non-Moving Products)" for item in items)
 
         rules_df = rules_df[rules_df.apply(
@@ -581,7 +696,7 @@ def run_deadstock_fpgrowth_to_db():
         for _, row in rules_df.iterrows():
             antecedent = tuple(sorted(row["antecedent"]))
             consequent = tuple(sorted(row["consequent"]))
-            rule_key = (antecedent, consequent)
+            rule_key = (antecedent, consequent) #biar ga duplikat
             if rule_key not in seen_rules:
                 cursor.execute(f"""
                     INSERT INTO {get_table_name('bundling_ds')} (support, confidence, lift)
@@ -627,7 +742,7 @@ def check_all_tables_have_data():
         
         tables = [
             "bundling_all", "bundling_similarity", "bundling_ds",
-            "perubahan_bundling", "similarity", "sold_together",
+            "similarity", "sold_together",
             "deadstock", "penjualan", "rfm", "category", "barang"
         ]
         
@@ -691,7 +806,7 @@ def clear_all_tables():
         
         tables = [
             "bundling_all", "bundling_similarity", "bundling_ds",
-            "perubahan_bundling", "similarity", "sold_together",
+            "similarity", "sold_together",
             "deadstock", "penjualan", "rfm", "category", "barang"
         ]
         
@@ -1103,7 +1218,7 @@ elif st.session_state.wizard_step == 3:
                 if dropped_rows_dates > 0:
                     st.warning(f"⚠️ {dropped_rows_dates} row(s) with missing or invalid dates were removed.")
 
-                if df.empty:
+                if df.empty: # jika semua data hilang setelah pembersihan tanggal atau kolom lain, proses dihentikan
                     st.error("❌ No valid data remains after removing rows with invalid dates. Please ensure the file contains valid date data.")
                     st.session_state.analysis_running = False
                     st.stop()
@@ -1219,7 +1334,7 @@ elif st.session_state.wizard_step == 3:
 
                     grouped_sales = df_sales.groupby('Kode Nota')['Deskripsi Brg'].apply(set).reset_index()
                     sold_together = grouped_sales[grouped_sales['Deskripsi Brg'].apply(len) > 1]
-                    sold_together_items = set()
+                    sold_together_items = set() #buat array
                     for items in sold_together['Deskripsi Brg']:
                         sold_together_items.update(items)
 
